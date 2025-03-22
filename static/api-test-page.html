@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Azure Face API Diagnostics</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            margin: 20px;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        h1, h2 {
+            color: #333;
+        }
+        .card {
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 15px;
+            margin-bottom: 20px;
+            background-color: #f9f9f9;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px 0;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        pre {
+            background-color: #f4f4f4;
+            border: 1px solid #ddd;
+            border-radius: 3px;
+            padding: 10px;
+            overflow: auto;
+            max-height: 400px;
+        }
+        input[type="file"] {
+            margin: 10px 0;
+        }
+        .success {
+            color: green;
+        }
+        .error {
+            color: red;
+        }
+        .note {
+            background-color: #ffffd8;
+            border-left: 4px solid #ffeb3b;
+            padding: 10px;
+            margin-bottom: 15px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Azure Face API Diagnostics</h1>
+    
+    <div class="note">
+        <strong>Note:</strong> This test page has been updated to work with the current Azure Face API limitations. 
+        Only supported attributes (headPose and glasses) are used. Emotion, age, and other attributes have been deprecated by Microsoft.
+    </div>
+    
+    <div class="card">
+        <h2>1. Check API Credentials</h2>
+        <p>First, let's verify if your Azure Face API credentials are correctly configured and working.</p>
+        <button id="checkCredentialsBtn">Check Credentials</button>
+        <div id="credentialsResult"></div>
+    </div>
+    
+    <div class="card">
+        <h2>2. Test Face Detection with Sample Image</h2>
+        <p>Upload a clear face image to test if the API can detect faces.</p>
+        <input type="file" id="imageUpload" accept="image/*">
+        <button id="testImageBtn" disabled>Test with SDK</button>
+        <button id="testDirectBtn" disabled>Test Direct API Call</button>
+        <div id="imageResult"></div>
+    </div>
+    
+    <div class="card">
+        <h2>3. Test Study Assistant Features</h2>
+        <p>Test the specific features used in the study assistant application.</p>
+        <input type="file" id="studyImageUpload" accept="image/*">
+        <button id="testBlinkBtn" disabled>Test Blink Detection</button>
+        <button id="testHeadPoseBtn" disabled>Test Head Pose</button>
+        <div id="studyFeaturesResult"></div>
+    </div>
+    
+    <script>
+        const API_URL = 'http://localhost:8000';
+        
+        // DOM elements
+        const checkCredentialsBtn = document.getElementById('checkCredentialsBtn');
+        const credentialsResult = document.getElementById('credentialsResult');
+        const imageUpload = document.getElementById('imageUpload');
+        const testImageBtn = document.getElementById('testImageBtn');
+        const testDirectBtn = document.getElementById('testDirectBtn');
+        const imageResult = document.getElementById('imageResult');
+        const studyImageUpload = document.getElementById('studyImageUpload');
+        const testBlinkBtn = document.getElementById('testBlinkBtn');
+        const testHeadPoseBtn = document.getElementById('testHeadPoseBtn');
+        const studyFeaturesResult = document.getElementById('studyFeaturesResult');
+        
+        // Check credentials
+        checkCredentialsBtn.addEventListener('click', async () => {
+            credentialsResult.innerHTML = '<p>Checking credentials...</p>';
+            
+            try {
+                const response = await fetch(`${API_URL}/check-azure-credentials/`);
+                const data = await response.json();
+                
+                let resultHtml = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+                
+                if (data.valid === true) {
+                    resultHtml = `<p class="success">✅ Credentials are valid!</p>` + resultHtml;
+                } else if (data.valid === false) {
+                    resultHtml = `<p class="error">❌ Credentials are invalid or not set.</p>` + resultHtml;
+                } else {
+                    resultHtml = `<p class="error">❓ Credential status couldn't be determined.</p>` + resultHtml;
+                }
+                
+                credentialsResult.innerHTML = resultHtml;
+            } catch (err) {
+                credentialsResult.innerHTML = `
+                    <p class="error">Error checking credentials: ${err.message}</p>
+                    <p>Make sure your API is running at ${API_URL}</p>
+                `;
+            }
+        });
+        
+        // Enable/disable test buttons based on file selection
+        imageUpload.addEventListener('change', () => {
+            testImageBtn.disabled = !imageUpload.files.length;
+            testDirectBtn.disabled = !imageUpload.files.length;
+        });
+        
+        studyImageUpload.addEventListener('change', () => {
+            testBlinkBtn.disabled = !studyImageUpload.files.length;
+            testHeadPoseBtn.disabled = !studyImageUpload.files.length;
+        });
+        
+        // Test face detection with uploaded image using SDK
+        testImageBtn.addEventListener('click', async () => {
+            if (!imageUpload.files.length) return;
+            
+            imageResult.innerHTML = '<p>Processing image using SDK...</p>';
+            
+            const formData = new FormData();
+            formData.append('file', imageUpload.files[0]);
+            
+            try {
+                const response = await fetch(`${API_URL}/simple-face-test/`, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                let resultHtml = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+                
+                if (data.success) {
+                    resultHtml = `<p class="success">✅ Success! Detected ${data.detected_faces} faces.</p>` + resultHtml;
+                } else {
+                    resultHtml = `<p class="error">❌ Face detection failed: ${data.error}</p>` + resultHtml;
+                }
+                
+                imageResult.innerHTML = resultHtml;
+            } catch (err) {
+                imageResult.innerHTML = `
+                    <p class="error">Error testing face detection: ${err.message}</p>
+                    <p>Make sure your API is running at ${API_URL}</p>
+                `;
+            }
+        });
+
+        // Test face detection with uploaded image using direct API call
+        testDirectBtn.addEventListener('click', async () => {
+            if (!imageUpload.files.length) return;
+            
+            imageResult.innerHTML = '<p>Processing image using direct API call...</p>';
+            
+            const formData = new FormData();
+            formData.append('file', imageUpload.files[0]);
+            
+            try {
+                const response = await fetch(`${API_URL}/direct-face-test/`, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                let resultHtml = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+                
+                if (data.success) {
+                    resultHtml = `<p class="success">✅ Success! Detected ${data.detected_faces} faces.</p>` + resultHtml;
+                } else {
+                    resultHtml = `<p class="error">❌ Face detection failed: ${data.error}</p>` + resultHtml;
+                }
+                
+                imageResult.innerHTML = resultHtml;
+            } catch (err) {
+                imageResult.innerHTML = `
+                    <p class="error">Error with direct API call: ${err.message}</p>
+                    <p>Make sure your API is running at ${API_URL}</p>
+                `;
+            }
+        });
+
+        // Test blink detection with the detect-face endpoint
+        testBlinkBtn.addEventListener('click', async () => {
+            if (!studyImageUpload.files.length) return;
+            
+            studyFeaturesResult.innerHTML = '<p>Testing blink detection...</p>';
+            
+            const formData = new FormData();
+            formData.append('file', studyImageUpload.files[0]);
+            
+            try {
+                const response = await fetch(`${API_URL}/detect-face/`, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
+                // Process the response to calculate eye heights
+                let analysisHtml = '';
+                if (data.faces && data.faces.length > 0) {
+                    const face = data.faces[0];
+                    
+                    // Calculate eye heights if landmarks are available
+                    if (face.landmarks) {
+                        const leftEyeTop = face.landmarks.eye_left_top;
+                        const leftEyeBottom = face.landmarks.eye_left_bottom;
+                        const rightEyeTop = face.landmarks.eye_right_top;
+                        const rightEyeBottom = face.landmarks.eye_right_bottom;
+                        
+                        if (leftEyeTop && leftEyeBottom && rightEyeTop && rightEyeBottom) {
+                            const leftEyeHeight = Math.abs(leftEyeTop[1] - leftEyeBottom[1]);
+                            const rightEyeHeight = Math.abs(rightEyeTop[1] - rightEyeBottom[1]);
+                            
+                            analysisHtml = `
+                                <p>Left eye height: ${leftEyeHeight.toFixed(2)}</p>
+                                <p>Right eye height: ${rightEyeHeight.toFixed(2)}</p>
+                                <p>Eyes likely ${(leftEyeHeight < 2.0 && rightEyeHeight < 2.0) ? 'closed' : 'open'}</p>
+                            `;
+                        }
+                    }
+                }
+                
+                let resultHtml = `
+                    <p class="success">✅ Face detection successful!</p>
+                    ${analysisHtml}
+                    <pre>${JSON.stringify(data, null, 2)}</pre>
+                `;
+                
+                studyFeaturesResult.innerHTML = resultHtml;
+            } catch (err) {
+                studyFeaturesResult.innerHTML = `
+                    <p class="error">Error testing blink detection: ${err.message}</p>
+                    <p>Make sure your API is running at ${API_URL}</p>
+                `;
+            }
+        });
+
+        // Test head pose detection
+        testHeadPoseBtn.addEventListener('click', async () => {
+            if (!studyImageUpload.files.length) return;
+            
+            studyFeaturesResult.innerHTML = '<p>Testing head pose detection...</p>';
+            
+            const formData = new FormData();
+            formData.append('file', studyImageUpload.files[0]);
+            
+            try {
+                const response = await fetch(`${API_URL}/detect-face/`, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
+                // Process the response to extract head pose
+                let analysisHtml = '';
+                if (data.faces && data.faces.length > 0) {
+                    const face = data.faces[0];
+                    
+                    if (face.head_pose) {
+                        const { pitch, roll, yaw } = face.head_pose;
+                        
+                        // Interpret the head pose
+                        const lookingAway = Math.abs(yaw) > 30;
+                        const lookingDown = pitch > 15;
+                        const lookingUp = pitch < -15;
+                        
+                        analysisHtml = `
+                            <p>Head pose:</p>
+                            <ul>
+                                <li>Pitch: ${pitch.toFixed(2)} (${lookingDown ? 'looking down' : lookingUp ? 'looking up' : 'level'})</li>
+                                <li>Roll: ${roll.toFixed(2)}</li>
+                                <li>Yaw: ${yaw.toFixed(2)} (${lookingAway ? 'looking away' : 'looking forward'})</li>
+                            </ul>
+                            <p>${lookingAway ? '⚠️ Distraction detected: Head turned away' : '✅ Head position indicates attention'}</p>
+                        `;
+                    }
+                }
+                
+                let resultHtml = `
+                    <p class="success">✅ Face detection successful!</p>
+                    ${analysisHtml}
+                    <pre>${JSON.stringify(data, null, 2)}</pre>
+                `;
+                
+                studyFeaturesResult.innerHTML = resultHtml;
+            } catch (err) {
+                studyFeaturesResult.innerHTML = `
+                    <p class="error">Error testing head pose detection: ${err.message}</p>
+                    <p>Make sure your API is running at ${API_URL}</p>
+                `;
+            }
+        });
+    </script>
+</body>
+</html>

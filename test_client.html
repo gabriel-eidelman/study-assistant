@@ -1,0 +1,796 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Study Assistant Test Client</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            line-height: 1.6;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        .video-container {
+            margin-bottom: 20px;
+            position: relative;
+        }
+        #videoElement {
+            width: 640px;
+            height: 480px;
+            background-color: #ddd;
+            border: 1px solid #999;
+        }
+        #faceMeshCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 640px;
+            height: 480px;
+        }
+        button {
+            padding: 10px 15px;
+            margin: 5px;
+            cursor: pointer;
+        }
+        #results {
+            margin-top: 20px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            min-height: 200px;
+            white-space: pre-wrap;
+        }
+        .metrics {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            margin-top: 20px;
+        }
+        .metric-card {
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 10px;
+            min-width: 150px;
+            background-color: #f9f9f9;
+        }
+        .suggestion {
+            background-color: #e6f7ff;
+            border-left: 4px solid #1890ff;
+            padding: 10px;
+            margin-top: 15px;
+        }
+        .note {
+            background-color: #fff7e6;
+            border-left: 4px solid #ffa940;
+            padding: 10px;
+            margin-bottom: 15px;
+        }
+        .debug-panel {
+            margin-top: 15px;
+            padding: 10px;
+            background-color: #f0f0f0;
+            border: 1px solid #ddd;
+        }
+        .stat-value {
+            font-weight: bold;
+        }
+        #loadingMessage {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            padding: 10px;
+            background-color: #e6f7ff;
+            color: #1890ff;
+            text-align: center;
+            z-index: 1000;
+        }
+        .error {
+            color: red;
+            font-weight: bold;
+            padding: 10px;
+            background-color: #fff1f0;
+            border-left: 4px solid #ff4d4f;
+            margin-bottom: 15px;
+        }
+    </style>
+    <!-- Fix: Load face-api.js from a more reliable CDN with IIFE format to avoid exports is not defined error -->
+    <script src="https://unpkg.com/face-api.js@0.22.2/dist/face-api.min.js"></script>
+</head>
+<body>
+    <div id="loadingMessage" style="display: none;">Loading face detection models... Please wait.</div>
+    
+    <div class="container">
+        <h1>Study Assistant Test Client</h1>
+        
+        <div id="errorMessage" class="error" style="display: none;"></div>
+        
+        <div class="note">
+            <strong>Note:</strong> This client uses client-side processing for blink detection at a higher 
+            frequency (5Hz), while sending less frequent updates to the server for head position and posture analysis.
+        </div>
+        
+        <div class="video-container">
+            <video id="videoElement" autoplay muted></video>
+            <canvas id="faceMeshCanvas"></canvas>
+        </div>
+        
+        <div class="controls">
+            <button id="startSessionBtn">Start Study Session</button>
+            <button id="captureFrameBtn" disabled>Capture Frame</button>
+            <button id="endSessionBtn" disabled>End Session</button>
+            <button id="testDetectionBtn">Test Face Detection</button>
+        </div>
+        
+        <div class="status">
+            <p>Status: <span id="statusText">Not started</span></p>
+            <p>Session ID: <span id="sessionId">None</span></p>
+        </div>
+        
+        <div class="metrics">
+            <div class="metric-card">
+                <h3>Focus</h3>
+                <p id="focusMetric">-</p>
+            </div>
+            <div class="metric-card">
+                <h3>Blink Rate</h3>
+                <p id="blinkMetric">-</p>
+                <p>Last minute: <span id="blinkRateValue" class="stat-value">-</span> blinks/min</p>
+            </div>
+            <div class="metric-card">
+                <h3>Head Position</h3>
+                <p id="headPoseMetric">-</p>
+            </div>
+            <div class="metric-card">
+                <h3>Posture</h3>
+                <p id="postureMetric">-</p>
+            </div>
+        </div>
+        
+        <div id="suggestion" class="suggestion" style="display: none;">
+            No suggestions yet
+        </div>
+        
+        <div class="debug-panel">
+            <h3>Client-Side Metrics:</h3>
+            <p>Last blink: <span id="lastBlinkTime">-</span></p>
+            <p>Blink count: <span id="blinkCounter">0</span></p>
+            <p>Eye aspect ratio: <span id="eyeAspectRatio">-</span></p>
+            <p>Face detection FPS: <span id="faceDetectionFPS">-</span></p>
+        </div>
+        
+        <h2>Results:</h2>
+        <div id="results">Results will appear here...</div>
+    </div>
+
+    <script>
+        const API_URL = 'http://localhost:8000';
+        let currentSessionId = null;
+        let captureInterval = null;
+        let localProcessingInterval = null;
+        
+        // Face detection variables
+        let lastEyeRatio = 1.0;
+        let eyesClosed = false;
+        let blinkCount = 0;
+        let lastBlinkTime = Date.now();
+        let blinkRates = [];
+        let lastFrameTime = Date.now();
+        let faceDetectionTimes = [];
+        let isModelLoaded = false;
+        let eyeAspectRatioThreshold = 0.3;
+        
+        // DOM elements
+        const video = document.getElementById('videoElement');
+        const canvas = document.getElementById('faceMeshCanvas');
+        const startBtn = document.getElementById('startSessionBtn');
+        const captureBtn = document.getElementById('captureFrameBtn');
+        const endBtn = document.getElementById('endSessionBtn');
+        const testBtn = document.getElementById('testDetectionBtn');
+        const statusText = document.getElementById('statusText');
+        const sessionIdElement = document.getElementById('sessionId');
+        const resultsDiv = document.getElementById('results');
+        const suggestionDiv = document.getElementById('suggestion');
+        const focusMetric = document.getElementById('focusMetric');
+        const blinkMetric = document.getElementById('blinkMetric');
+        const blinkRateValue = document.getElementById('blinkRateValue');
+        const headPoseMetric = document.getElementById('headPoseMetric');
+        const postureMetric = document.getElementById('postureMetric');
+        const lastBlinkTimeElement = document.getElementById('lastBlinkTime');
+        const blinkCounterElement = document.getElementById('blinkCounter');
+        const eyeAspectRatioElement = document.getElementById('eyeAspectRatio');
+        const faceDetectionFPSElement = document.getElementById('faceDetectionFPS');
+        const loadingMessage = document.getElementById('loadingMessage');
+        const errorMessage = document.getElementById('errorMessage');
+        
+        // Show an error message
+        function showError(message) {
+            errorMessage.textContent = message;
+            errorMessage.style.display = 'block';
+            console.error(message);
+        }
+        
+        // Hide the error message
+        function hideError() {
+            errorMessage.style.display = 'none';
+        }
+        
+        // Initialize face-api.js
+        async function initFaceAPI() {
+            try {
+                loadingMessage.style.display = 'block';
+                statusText.textContent = 'Loading face detection models...';
+                hideError();
+                
+                // Set the models URL to the static directory
+                const modelUrl = '/static/models';
+                
+                console.log(`Loading models from ${modelUrl}`);
+                
+                // Check if faceapi is defined and available
+                if (typeof faceapi === 'undefined') {
+                    showError('face-api.js library not loaded correctly. Please check your internet connection.');
+                    loadingMessage.style.display = 'none';
+                    return false;
+                }
+                
+                // Load the face detection models
+                try {
+                    await faceapi.nets.tinyFaceDetector.loadFromUri(modelUrl);
+                    console.log('Loaded TinyFaceDetector model');
+                } catch (err) {
+                    showError(`Error loading TinyFaceDetector model: ${err.message}`);
+                    console.error('Full error:', err);
+                    loadingMessage.style.display = 'none';
+                    return false;
+                }
+                
+                try {
+                    await faceapi.nets.faceLandmark68Net.loadFromUri(modelUrl);
+                    console.log('Loaded FaceLandmark model');
+                } catch (err) {
+                    showError(`Error loading FaceLandmark model: ${err.message}`);
+                    console.error('Full error:', err);
+                    loadingMessage.style.display = 'none';
+                    return false;
+                }
+                
+                // If we got here, all models loaded successfully
+                loadingMessage.style.display = 'none';
+                statusText.textContent = 'Face detection models loaded';
+                console.log('All face detection models loaded successfully');
+                isModelLoaded = true;
+                
+                return true;
+            } catch (err) {
+                loadingMessage.style.display = 'none';
+                showError(`Error during model loading: ${err.message}`);
+                console.error('Full error:', err);
+                statusText.textContent = 'Error loading face detection models';
+                return false;
+            }
+        }
+        
+        // Start webcam
+        async function startWebcam() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { 
+                        width: { ideal: 640 },
+                        height: { ideal: 480 },
+                        facingMode: "user"
+                    } 
+                });
+                video.srcObject = stream;
+                
+                // Initialize face detection after webcam is ready
+                video.onloadedmetadata = () => {
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                    initFaceAPI();
+                };
+            } catch (err) {
+                console.error('Error accessing webcam:', err);
+                resultsDiv.textContent = 'Error accessing webcam: ' + err.message;
+                showError(`Cannot access webcam: ${err.message}. Please ensure camera permissions are enabled for this page.`);
+            }
+        }
+        
+        // Calculate eye aspect ratio (EAR) - to detect blinks
+        function calculateEyeAspectRatio(eye) {
+            // Euclidean distance between two points
+            function euclideanDist(pt1, pt2) {
+                return Math.sqrt(Math.pow(pt2.x - pt1.x, 2) + Math.pow(pt2.y - pt1.y, 2));
+            }
+            
+            // Calculate the height of the eye (average of two vertical measurements)
+            const h1 = euclideanDist(eye[1], eye[5]);
+            const h2 = euclideanDist(eye[2], eye[4]);
+            
+            // Calculate the width of the eye
+            const w = euclideanDist(eye[0], eye[3]);
+            
+            // Calculate EAR
+            // EAR = (h1 + h2) / (2 * w)
+            if (w === 0) return 1.0; // Avoid division by zero
+            return (h1 + h2) / (2 * w);
+        }
+        
+        // Process webcam frame to detect blinks at a high frequency
+        async function processLocalFrame() {
+            const timestamp = Date.now();
+            if (timestamp % 1000 < 200) { // Log roughly every second
+                console.log("Face processing running at:", new Date().toLocaleTimeString());
+            }
+            if (!isModelLoaded) {
+                console.log("Face detection models not loaded yet");
+                return;
+            }
+            
+            if (video.readyState !== 4) {
+                console.log("Video not ready yet");
+                return;
+            }
+            
+            const now = Date.now();
+            const elapsed = now - lastFrameTime;
+            lastFrameTime = now;
+            
+            // Calculate FPS
+            faceDetectionTimes.push(elapsed);
+            if (faceDetectionTimes.length > 30) {
+                faceDetectionTimes.shift();
+            }
+            
+            const avgTime = faceDetectionTimes.reduce((sum, time) => sum + time, 0) / faceDetectionTimes.length;
+            const fps = Math.round(1000 / avgTime);
+            faceDetectionFPSElement.textContent = fps;
+            
+            try {
+                // Detect face landmarks using updated API
+                const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 160, scoreThreshold: 0.5 });
+                const detections = await faceapi.detectAllFaces(video, options)
+                    .withFaceLandmarks();
+                
+                const ctx = canvas.getContext('2d');
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                
+                if (detections && detections.length > 0) {
+                    const result = detections[0]; // Get the first face
+                    
+                    // Draw facial landmarks for visualization
+                    faceapi.draw.drawFaceLandmarks(canvas, result);
+                    
+                    // Get eyes landmarks
+                    const landmarks = result.landmarks;
+                    const leftEye = landmarks.getLeftEye();
+                    const rightEye = landmarks.getRightEye();
+                    
+                    // Calculate eye aspect ratio for both eyes
+                    const leftEAR = calculateEyeAspectRatio(leftEye);
+                    const rightEAR = calculateEyeAspectRatio(rightEye);
+                    
+                    // Average of both eyes
+                    const earValue = (leftEAR + rightEAR) / 2;
+
+                    // Inside processLocalFrame function, after calculating earValue:
+                    if (Math.random() < 0.05) { // Sample 5% of frames to avoid console flood
+                        console.log(`EAR: ${earValue.toFixed(3)}, Threshold: ${eyeAspectRatioThreshold}, Closed: ${eyesClosed}`);
+                    }
+                    eyeAspectRatioElement.textContent = earValue.toFixed(3);
+                    
+                    // Detect blink (eye closure followed by opening)
+                    const previousEyesClosed = eyesClosed;
+                    eyesClosed = earValue < eyeAspectRatioThreshold;
+                    
+                    // If eyes were closed but now open, count as a blink
+                    if (previousEyesClosed && !eyesClosed) {
+                        blinkCount++;
+                        lastBlinkTime = now;
+                        blinkCounterElement.textContent = blinkCount;
+                        lastBlinkTimeElement.textContent = new Date(lastBlinkTime).toLocaleTimeString();
+                        
+                        // Update UI
+                        blinkMetric.textContent = 'Blinked ✓';
+                        setTimeout(() => {
+                            if (blinkMetric.textContent === 'Blinked ✓') {
+                                blinkMetric.textContent = 'Eyes open ✓';
+                            }
+                        }, 500);
+                    } else if (eyesClosed) {
+                        blinkMetric.textContent = 'Eyes closed 👀';
+                    } else {
+                        blinkMetric.textContent = 'Eyes open ✓';
+                    }
+                    
+                    // Calculate blink rate per minute
+                    const oneMinuteAgo = now - 60000;
+                    
+                    // Store timestamped blinks for rate calculation
+                    if (previousEyesClosed && !eyesClosed) {
+                        blinkRates.push(now);
+                    }
+                    
+                    // Remove blinks older than one minute
+                    blinkRates = blinkRates.filter(time => time > oneMinuteAgo);
+                    
+                    // Calculate blinks per minute
+                    const blinksPerMinute = blinkRates.length;
+                    blinkRateValue.textContent = blinksPerMinute;
+                    
+                    // Determine focus based on blink rate
+                    if (blinksPerMinute < 5) {
+                        focusMetric.textContent = 'Potential eye strain ⚠️';
+                    } else if (blinksPerMinute > 30) {
+                        focusMetric.textContent = 'Potential fatigue ⚠️';
+                    } else {
+                        focusMetric.textContent = 'Normal blink rate ✓';
+                    }
+                    
+                    // Send metrics to server every 5 seconds
+                    if (currentSessionId && now % 5000 < 200) {
+                        sendClientMetrics();
+                    }
+                    
+                    // Clear any error message since face detection is working
+                    hideError();
+                    
+                } else {
+                    blinkMetric.textContent = 'No face detected';
+                    focusMetric.textContent = 'Face not detected';
+                    headPoseMetric.textContent = 'Face not detected';
+                }
+            } catch (err) {
+                console.error('Error in local frame processing:', err);
+                showError(`Face detection error: ${err.message}`);
+            }
+        }
+        
+        // Start a new study session
+        async function startSession() {
+            try {
+                const response = await fetch(`${API_URL}/start-session/`, {
+                    method: 'POST'
+                });
+                
+                const data = await response.json();
+                currentSessionId = data.session_id;
+                
+                statusText.textContent = 'Session active';
+                sessionIdElement.textContent = currentSessionId;
+                
+                startBtn.disabled = true;
+                captureBtn.disabled = false;
+                endBtn.disabled = false;
+                
+                // Reset metrics and counters
+                blinkCount = 0;
+                blinkRates = [];
+                blinkCounterElement.textContent = blinkCount;
+                focusMetric.textContent = 'Monitoring...';
+                blinkMetric.textContent = 'Monitoring...';
+                headPoseMetric.textContent = 'Monitoring...';
+                postureMetric.textContent = 'Monitoring...';
+                
+                // Hide suggestion initially
+                suggestionDiv.style.display = 'none';
+                
+                resultsDiv.textContent = JSON.stringify(data, null, 2);
+                
+                // Start local face processing at high frequency (5Hz)
+                localProcessingInterval = setInterval(processLocalFrame, 200);
+                
+                // Start server frame capture at lower frequency (every 3 seconds)
+                captureInterval = setInterval(captureFrame, 3000);
+            } catch (err) {
+                console.error('Error starting session:', err);
+                resultsDiv.textContent = 'Error starting session: ' + err.message;
+                showError(`Error starting session: ${err.message}. Make sure the API server is running at ${API_URL}`);
+            }
+        }
+        
+        // Send client-computed metrics to server
+        async function sendClientMetrics() {
+            
+            if (!currentSessionId) return;
+            
+            try {
+                // Calculate blinks per minute
+                const now = Date.now();
+                const oneMinuteAgo = now - 60000;
+                const recentBlinks = blinkRates.filter(time => time > oneMinuteAgo);
+                const blinksPerMinute = recentBlinks.length;
+                
+                // Calculate average time between blinks
+                let avgBlinkDuration = 0;
+                if (recentBlinks.length > 1) {
+                    let totalDuration = 0;
+                    for (let i = 1; i < recentBlinks.length; i++) {
+                        totalDuration += recentBlinks[i] - recentBlinks[i-1];
+                    }
+                    avgBlinkDuration = totalDuration / (recentBlinks.length - 1);
+                }
+                
+                // Client-side attention estimate (simple heuristic based on blink rate)
+                let attentionEstimate = 1.0;
+                
+                // If blink rate is too low, attention might be hyperfocused or straining
+                if (blinksPerMinute < 5) {
+                    attentionEstimate = 0.7;
+                }
+                // If blink rate is too high, attention might be decreasing
+                else if (blinksPerMinute > 30) {
+                    attentionEstimate = 0.6;
+                }
+                
+                // In your sendClientMetrics function, modify the clientMetrics object:
+                const clientMetrics = {
+                    timestamp: new Date().toISOString(),
+                    blink_metrics: {
+                        blink_count: blinkCount,
+                        blink_rate: blinksPerMinute,
+                        avg_blink_duration: recentBlinks.length > 1 ? avgBlinkDuration : null  // Send null instead of 0
+                    },
+                    seconds_since_last_movement: Math.round((now - lastBlinkTime) / 1000),  // Convert to integer
+                    client_estimated_attention: attentionEstimate
+                };
+                
+                // Add this before the fetch call
+                console.log("Full client metrics payload:", JSON.stringify(clientMetrics, null, 2));                
+                const response = await fetch(`${API_URL}/submit-client-metrics/${currentSessionId}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(clientMetrics)
+                });
+                
+                const data = await response.json();
+                
+                // Display suggestion if provided
+                if (data.suggestion) {
+                    suggestionDiv.textContent = data.suggestion;
+                    suggestionDiv.style.display = 'block';
+                }
+                
+            } catch (err) {
+                console.error('Error sending client metrics:', err);
+                showError(`Error sending metrics to server: ${err.message}`);
+            }
+        }
+        
+        // Capture and process a single frame for server analysis
+        async function captureFrame() {
+            if (!currentSessionId) return;
+            
+            try {
+                // Create a canvas element to capture the current video frame
+                const captureCanvas = document.createElement('canvas');
+                captureCanvas.width = video.videoWidth;
+                captureCanvas.height = video.videoHeight;
+                
+                const ctx = captureCanvas.getContext('2d');
+                ctx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
+                
+                // Convert canvas to blob with higher quality
+                const blob = await new Promise(resolve => {
+                    captureCanvas.toBlob(resolve, 'image/jpeg', 0.95);  // Higher quality (0.95)
+                });
+                
+                // Create form data with the captured image
+                const formData = new FormData();
+                formData.append('file', blob, 'frame.jpg');
+                
+                // Send to API
+                const response = await fetch(`${API_URL}/process-frame/${currentSessionId}`, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                resultsDiv.textContent = JSON.stringify(data, null, 2);
+                
+                // Update metrics if details are available
+                if (data.details) {
+                    // Update head pose metric - using our estimated head orientation
+                    if (data.details.head_orientation) {
+                        const headYaw = Math.abs(data.details.head_orientation.yaw);
+                        const headPitch = data.details.head_orientation.pitch;
+                        
+                        let headStatus = 'Looking forward ✓';
+                        
+                        if (headYaw > 15) {
+                            headStatus = 'Looking away ⚠️';
+                        } else if (headPitch > 15) {
+                            headStatus = 'Looking down ⚠️';
+                        } else if (headPitch < -15) {
+                            headStatus = 'Looking up ⚠️';
+                        }
+                        
+                        headPoseMetric.textContent = headStatus;
+                    }
+                    
+                    // Update posture metric
+                    if (data.details.posture) {
+                        const posture = data.details.posture;
+                        if (posture.is_slouching) {
+                            postureMetric.textContent = 'Slouching ⚠️';
+                        } else if (posture.is_leaning_back) {
+                            postureMetric.textContent = 'Leaning back ⚠️';
+                        } else {
+                            postureMetric.textContent = 'Good posture ✓';
+                        }
+                    }
+                }
+                
+                // If there's a suggestion, display it
+                if (data.suggestion) {
+                    suggestionDiv.textContent = data.suggestion;
+                    suggestionDiv.style.display = 'block';
+                    statusText.textContent = data.suggestion;
+                }
+            } catch (err) {
+                console.error('Error capturing frame:', err);
+                resultsDiv.textContent = 'Error capturing frame: ' + err.message;
+                showError(`Error sending frame to server: ${err.message}`);
+            }
+        }
+        
+        // End the current study session
+        async function endSession() {
+            if (!currentSessionId) return;
+            
+            try {
+                // Stop processing intervals
+                clearInterval(captureInterval);
+                clearInterval(localProcessingInterval);
+                
+                const response = await fetch(`${API_URL}/end-session/${currentSessionId}`, {
+                    method: 'POST'
+                });
+                
+                const data = await response.json();
+                
+                // Display session summary
+                let summaryHTML = `<h3>Study Session Summary</h3>
+                    <p>Duration: ${data.duration_minutes.toFixed(2)} minutes</p>
+                    <p>Distraction events: ${data.distraction_count}</p>
+                    <p>Average focus period: ${data.average_focus_period_minutes.toFixed(2)} minutes</p>
+                    <p>Posture changes: ${data.posture_change_count}</p>`;
+                    
+                if (data.average_blink_rate !== null) {
+                    summaryHTML += `<p>Average blink rate: ${data.average_blink_rate.toFixed(1)} blinks/minute</p>`;
+                }
+                
+                if (data.suggestions && data.suggestions.length > 0) {
+                    summaryHTML += '<h4>Suggestions for next time:</h4><ul>';
+                    data.suggestions.forEach(suggestion => {
+                        summaryHTML += `<li>${suggestion}</li>`;
+                    });
+                    summaryHTML += '</ul>';
+                }
+                
+                suggestionDiv.innerHTML = summaryHTML;
+                suggestionDiv.style.display = 'block';
+                
+                resultsDiv.textContent = JSON.stringify(data, null, 2);
+                
+                statusText.textContent = 'Session ended';
+                
+                startBtn.disabled = false;
+                captureBtn.disabled = true;
+                endBtn.disabled = true;
+                
+                // Clear canvas
+                const ctx = canvas.getContext('2d');
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                
+                currentSessionId = null;
+                sessionIdElement.textContent = 'None';
+                
+                // Hide any error messages
+                hideError();
+            } catch (err) {
+                console.error('Error ending session:', err);
+                resultsDiv.textContent = 'Error ending session: ' + err.message;
+                showError(`Error ending session: ${err.message}`);
+            }
+        }
+
+        async function testDetection() {
+            try {
+                hideError();
+                statusText.textContent = 'Testing basic face detection...';
+                
+                // Test client-side face detection
+                if (isModelLoaded) {
+                    try {
+                        // Create a canvas element to capture the current video frame
+                        const captureCanvas = document.createElement('canvas');
+                        captureCanvas.width = video.videoWidth;
+                        captureCanvas.height = video.videoHeight;
+                        
+                        const ctx = captureCanvas.getContext('2d');
+                        ctx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
+                        
+                        // Test with the face-api.js
+                        const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 160, scoreThreshold: 0.5 });
+                        const detections = await faceapi.detectAllFaces(video, options);
+                        
+                        if (detections && detections.length > 0) {
+                            statusText.textContent = "Client-side face detection working! Face detected.";
+                            
+                            // Also try to process a full frame to visualize landmarks
+                            await processLocalFrame();
+                        } else {
+                            statusText.textContent = "Client-side detection working, but no face found. Make sure your face is visible.";
+                        }
+                    } catch (err) {
+                        console.error("Error testing client-side detection:", err);
+                        showError(`Client-side face detection error: ${err.message}`);
+                    }
+                } else {
+                    showError("Face detection models not loaded yet. Please wait or check console for errors.");
+                    return;
+                }
+                
+                // Test server-side face detection
+                try {
+                    // Create a canvas element to capture the current video frame
+                    const captureCanvas = document.createElement('canvas');
+                    captureCanvas.width = video.videoWidth;
+                    captureCanvas.height = video.videoHeight;
+                    
+                    const ctx = captureCanvas.getContext('2d');
+                    ctx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
+                    
+                    // Convert canvas to blob with higher quality
+                    const blob = await new Promise(resolve => {
+                        captureCanvas.toBlob(resolve, 'image/jpeg', 0.95);
+                    });
+                    
+                    // Create form data with the captured image
+                    const formData = new FormData();
+                    formData.append('file', blob, 'test_frame.jpg');
+                    
+                    // Send to API
+                    const response = await fetch(`${API_URL}/simple-face-test/`, {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    const data = await response.json();
+                    resultsDiv.textContent = JSON.stringify(data, null, 2);
+                    
+                    if (data.success) {
+                        statusText.textContent += ` Server test successful! Detected ${data.detected_faces} faces.`;
+                    } else {
+                        showError(`Server-side test failed: ${data.error}`);
+                    }
+                } catch (err) {
+                    console.error('Error testing server face detection:', err);
+                    resultsDiv.textContent = 'Error testing face detection: ' + err.message;
+                    showError(`Server communication error: ${err.message}. Make sure the API server is running at ${API_URL}`);
+                }
+            } catch (err) {
+                console.error('General testing error:', err);
+                showError(`Test failed: ${err.message}`);
+            }
+        }
+        
+        // Event listeners
+        startBtn.addEventListener('click', startSession);
+        captureBtn.addEventListener('click', captureFrame);
+        endBtn.addEventListener('click', endSession);
+        testBtn.addEventListener('click', testDetection);
+
+        // Initialize webcam on page load
+        startWebcam();
+        
+        // Show debug info in console
+        console.log('Current API URL:', API_URL);
+        console.log('Face API version:', typeof faceapi !== 'undefined' ? 'Loaded' : 'Not loaded');
+    </script>
+</body>
+</html>
