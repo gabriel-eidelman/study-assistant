@@ -22,3 +22,7 @@ build/
 .vscode/
 *.swp
 *.swo
+
+# Models
+
+static/models
