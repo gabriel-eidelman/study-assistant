@@ -1,29 +1,21 @@
 import os
-import cv2
-import numpy as np
 import time
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 import json
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, UploadFile, BackgroundTasks, HTTPException, Body
+from fastapi import FastAPI, File, UploadFile, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 import uvicorn
-from azure.cognitiveservices.vision.face import FaceClient
-from azure.cognitiveservices.vision.face.models import FaceAttributeType
-from msrest.authentication import CognitiveServicesCredentials
-from io import BytesIO
-import requests
-
 
 # Load environment variables
 load_dotenv()
 
 # Initialize FastAPI app
-app = FastAPI(title="Study Assistant API", description="Track facial features to optimize study sessions")
+app = FastAPI(title="Enhanced Study Assistant API", description="Track study sessions with improved focus detection")
 
 # Enable CORS
 app.add_middleware(
@@ -39,27 +31,8 @@ static_dir = "static"
 if not os.path.exists(static_dir):
     os.makedirs(static_dir)
 
-models_dir = os.path.join(static_dir, "models")
-if not os.path.exists(models_dir):
-    os.makedirs(models_dir)
-
 # Mount static files directory
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
-
-# Azure Face API credentials
-face_key = os.getenv("AZURE_FACE_KEY")
-face_endpoint = os.getenv("AZURE_FACE_ENDPOINT")
-
-# Initialize Azure Face client
-face_client = None
-if face_key and face_endpoint:
-    try:
-        face_client = FaceClient(face_endpoint, CognitiveServicesCredentials(face_key))
-        print(f"Face client initialized with endpoint: {face_endpoint}")
-    except Exception as e:
-        print(f"Error initializing Face client: {str(e)}")
-else:
-    print("Azure Face API credentials not found in environment variables")
 
 # In-memory storage for study sessions
 # In a production app, you would use a proper database
@@ -71,109 +44,85 @@ class BlinkMetrics(BaseModel):
     blink_rate: float  # Blinks per minute
     avg_blink_duration: Optional[float] = None  # In milliseconds
 
+class GazeMetrics(BaseModel):
+    blink_rate: Optional[float] = None
+    attention_score: Optional[float] = None
+    looking_at_content_percentage: Optional[float] = None
+    looking_at_screen_percentage: Optional[float] = None
+
 class ClientMetrics(BaseModel):
     timestamp: str
     blink_metrics: BlinkMetrics
     seconds_since_last_movement: Optional[int] = None
     client_estimated_attention: Optional[float] = None  # 0-1 scale
+    tracking_mode: Optional[str] = None  # 'gaze', 'face', 'motion', 'memory', 'inactive'
+    motion_level: Optional[float] = None  # Motion level detected
+    input_events: Optional[int] = None  # Keyboard/mouse event count
+    gaze_metrics: Optional[GazeMetrics] = None  # New gaze tracking metrics
 
 @app.get("/")
 def read_root():
-    return {"message": "Study Assistant API is running"}
+    return {"message": "Enhanced Study Assistant API is running"}
+
+# Add this to your app.py file to explicitly create the static/models directory
+# Place this right after the existing static_dir check
+
+# Ensure models directory exists
+models_dir = os.path.join(static_dir, "models")
+if not os.path.exists(models_dir):
+    os.makedirs(models_dir)
+    print(f"Created directory: {models_dir}")
+
+# Add a route to check if face models are available
+@app.get("/check-models")
+def check_models():
+    """
+    Check if face detection model files are available
+    """
+    models_dir = os.path.join("static", "models")
+    required_files = [
+        "tiny_face_detector_model-weights_manifest.json",
+        "tiny_face_detector_model-shard1",
+        "face_landmark_68_model-weights_manifest.json",
+        "face_landmark_68_model-shard1"
+    ]
+    
+    # Check each required file
+    missing_files = []
+    for file in required_files:
+        file_path = os.path.join(models_dir, file)
+        if not os.path.exists(file_path):
+            missing_files.append(file)
+    
+    if missing_files:
+        return {
+            "status": "missing_files",
+            "missing": missing_files,
+            "message": "Some required face model files are missing. Run download_face_models.py to download them."
+        }
+    else:
+        return {
+            "status": "ok",
+            "message": "All required face model files are available."
+        }
 
 @app.get("/client", response_class=HTMLResponse)
 async def get_client():
     """
-    Serve the test client HTML page directly from FastAPI.
+    Serve the enhanced client HTML page directly from FastAPI.
     """
-    with open("test_client.html", "r") as f:
-        html_content = f.read()
-    return HTMLResponse(content=html_content)
-
-@app.post("/detect-face/")
-async def detect_face(file: UploadFile = File(...)):
-    """
-    Detect facial features using Azure Face API with minimal parameters.
-    This endpoint only does basic detection without using restricted features.
-    """
-    if not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="File must be an image")
-    
-    # Read the image file
-    contents = await file.read()
-    
     try:
-        # Detect faces with minimal parameters
-        image_stream = BytesIO(contents)
-        image_stream.seek(0)
-        
-        # Use minimal parameters to avoid Limited Access requirements
-        detected_faces = face_client.face.detect_with_stream(
-            image=image_stream,
-            return_face_id=False,
-            return_face_landmarks=True,  # Only get landmarks
-            return_face_attributes=[],   # No attributes
-            detection_model='detection_01'
-        )
-        
-        if not detected_faces:
-            return {"message": "No faces detected"}
-        
-        # Process the results - only use facial landmarks
-        results = []
-        for face in detected_faces:
-            # Extract landmarks for our own analysis
-            landmarks = face.face_landmarks
-            
-            # Detect head orientation using nose and eye positions
-            nose_tip = [landmarks.nose_tip.x, landmarks.nose_tip.y]
-            left_eye = [(landmarks.eye_left_inner.x + landmarks.eye_left_outer.x) / 2, 
-                        (landmarks.eye_left_inner.y + landmarks.eye_left_outer.y) / 2]
-            right_eye = [(landmarks.eye_right_inner.x + landmarks.eye_right_outer.x) / 2, 
-                         (landmarks.eye_right_inner.y + landmarks.eye_right_outer.y) / 2]
-                         
-            # Calculate head orientation from landmarks
-            head_orientation = estimate_head_orientation(left_eye, right_eye, nose_tip)
-            
-            # Calculate face size based on available landmarks
-            # Use the distance between eyes and mouth for height approximation
-            face_width = abs(landmarks.eye_left_outer.x - landmarks.eye_right_outer.x)
-            
-            # For height, we'll use the distance from eye level to mouth level
-            # Since mouth_bottom isn't available, we'll use the average of mouth_left and mouth_right
-            mouth_y = (landmarks.mouth_left.y + landmarks.mouth_right.y) / 2
-            eye_y = (left_eye[1] + right_eye[1]) / 2
-            face_height = abs(eye_y - mouth_y) * 1.5  # Multiply by 1.5 to account for forehead
-            
-            face_size = face_width * face_height
-            
-            # Estimate posture based on face position in frame
-            posture_estimate = estimate_posture(face_size, nose_tip[1])
-            
-            face_data = {
-                "landmarks": {
-                    "eye_left_outer": [landmarks.eye_left_outer.x, landmarks.eye_left_outer.y],
-                    "eye_left_top": [landmarks.eye_left_top.x, landmarks.eye_left_top.y],
-                    "eye_left_bottom": [landmarks.eye_left_bottom.x, landmarks.eye_left_bottom.y],
-                    "eye_left_inner": [landmarks.eye_left_inner.x, landmarks.eye_left_inner.y],
-                    "eye_right_outer": [landmarks.eye_right_outer.x, landmarks.eye_right_outer.y],
-                    "eye_right_top": [landmarks.eye_right_top.x, landmarks.eye_right_top.y],
-                    "eye_right_bottom": [landmarks.eye_right_bottom.x, landmarks.eye_right_bottom.y],
-                    "eye_right_inner": [landmarks.eye_right_inner.x, landmarks.eye_right_inner.y],
-                    "nose_tip": [landmarks.nose_tip.x, landmarks.nose_tip.y],
-                    "mouth_left": [landmarks.mouth_left.x, landmarks.mouth_left.y],
-                    "mouth_right": [landmarks.mouth_right.x, landmarks.mouth_right.y]
-                },
-                "head_orientation": head_orientation,
-                "posture": posture_estimate,
-                "face_size": face_size
-            }
-            results.append(face_data)
-        
-        return {"faces": results}
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
+        with open("enhanced_client.html", "r") as f:
+            html_content = f.read()
+        return HTMLResponse(content=html_content)
+    except FileNotFoundError:
+        # Fallback to test_client if enhanced version isn't found
+        try:
+            with open("test_client.html", "r") as f:
+                html_content = f.read()
+            return HTMLResponse(content=html_content)
+        except FileNotFoundError:
+            return HTMLResponse(content="<html><body><h1>Client file not found</h1><p>Please ensure the client HTML file exists.</p></body></html>")
 
 @app.post("/start-session/")
 def start_session():
@@ -189,533 +138,138 @@ def start_session():
             "blink_rate": [],
             "posture_changes": [],
             "distraction_events": [],
-            "focus_periods": []
+            "focus_periods": [],
+            "tracking_modes": []  # New metric to track when different tracking modes are used
         },
+        "active_times": [],  # Track active study periods (start, end) pairs
+        "current_active_start": datetime.now().isoformat(),  # Track when current active period started
+        "paused_times": [],  # Track paused periods (start, end) pairs
         "end_time": None
     }
     return {"session_id": session_id, "message": "Study session started"}
 
-@app.post("/simple-face-test/")
-async def simple_face_test(file: UploadFile = File(...)):
+@app.post("/pause-session/{session_id}")
+def pause_session(session_id: str):
     """
-    A simplified endpoint to test face detection functionality with minimal features.
-    Avoids all restricted features that require Limited Access approval.
-    """
-    if not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail=f"File must be an image, got {file.content_type}")
-    
-    # Read the image file
-    contents = await file.read()
-    image_size = len(contents)
-    
-    # Diagnostic info
-    diagnostic = {
-        "file_size": image_size,
-        "content_type": file.content_type,
-        "filename": file.filename,
-        "api_endpoint": face_endpoint,
-        "api_key_available": face_key is not None,
-        "sdk_version": "0.6.1"
-    }
-    
-    if image_size == 0:
-        return {
-            "success": False,
-            "error": "Empty image file",
-            "diagnostic": diagnostic,
-            "message": "Failed to detect faces - received empty file"
-        }
-    
-    try:
-        # Convert bytes to a file-like object
-        image_stream = BytesIO(contents)
-        image_stream.seek(0)  # Ensure we're at the start of the stream
-        
-        try:
-            # Use absolute minimum parameters - just detect if faces exist
-            print("Attempting basic face detection with minimal parameters...")
-            
-            detected_faces = face_client.face.detect_with_stream(
-                image=image_stream,
-                return_face_id=False,  # Don't request face IDs
-                return_face_landmarks=False,  # Don't request landmarks
-                return_face_attributes=[],  # No attributes
-                detection_model='detection_01'  # Basic detection model
-            )
-            
-            print(f"Detection successful! Found {len(detected_faces)} faces.")
-            
-            return {
-                "success": True,
-                "detected_faces": len(detected_faces),
-                "diagnostic": diagnostic,
-                "message": f"Successfully detected {len(detected_faces)} faces with minimal mode"
-            }
-            
-        except Exception as face_error:
-            error_str = str(face_error)
-            print(f"Face detection error: {error_str}")
-            
-            return {
-                "success": False,
-                "error": error_str,
-                "diagnostic": diagnostic,
-                "message": "Failed to detect faces - even with minimal parameters"
-            }
-            
-    except Exception as e:
-        print(f"General processing error: {str(e)}")
-        return {
-            "success": False,
-            "error": str(e),
-            "diagnostic": diagnostic,
-            "message": "Failed to process image"
-        }
-
-@app.post("/direct-face-test/")
-async def direct_face_test(file: UploadFile = File(...)):
-    """
-    Test face detection using direct HTTP requests to Azure API with minimal features.
-    Uses only the basic detection features that don't require Limited Access approval.
-    """
-    if not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail=f"File must be an image, got {file.content_type}")
-    
-    # Read the image file
-    contents = await file.read()
-    image_size = len(contents)
-    
-    # Diagnostic info
-    diagnostic = {
-        "file_size": image_size,
-        "content_type": file.content_type,
-        "filename": file.filename,
-        "api_endpoint": face_endpoint,
-        "api_key_available": face_key is not None
-    }
-    
-    if not face_key or not face_endpoint:
-        return {
-            "success": False,
-            "error": "Azure Face API credentials not configured",
-            "diagnostic": diagnostic
-        }
-    
-    if image_size == 0:
-        return {
-            "success": False,
-            "error": "Empty image file",
-            "diagnostic": diagnostic
-        }
-    
-    try:
-        # Construct the direct API URL
-        api_url = f"{face_endpoint}/face/v1.0/detect"
-        
-        # Set headers
-        headers = {
-            'Content-Type': file.content_type,
-            'Ocp-Apim-Subscription-Key': face_key
-        }
-        
-        # Use absolute minimum parameters to avoid requiring Limited Access
-        params = {
-            'returnFaceId': 'false',  # Don't get face IDs
-            'returnFaceLandmarks': 'false',  # Don't get landmarks
-            'returnFaceAttributes': '',  # No attributes
-            'detectionModel': 'detection_01'  # Basic detection model
-        }
-        
-        # Make direct API request
-        response = requests.post(api_url, params=params, headers=headers, data=contents)
-        
-        # Check status code
-        if response.status_code == 200:
-            # Success
-            faces = response.json()
-            return {
-                "success": True,
-                "detected_faces": len(faces),
-                "raw_response": faces,
-                "diagnostic": diagnostic,
-                "message": f"Successfully detected {len(faces)} faces using direct API call with minimal parameters"
-            }
-        else:
-            # Error
-            return {
-                "success": False,
-                "error": f"API returned status code {response.status_code}",
-                "raw_response": response.text,
-                "diagnostic": diagnostic,
-                "message": "Failed to detect faces - direct API call failed"
-            }
-            
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "diagnostic": diagnostic,
-            "message": "Failed to process image with direct API call"
-        }
-
-# Add this endpoint to serve the test page
-@app.get("/test-page")
-async def get_test_page():
-    """
-    Serve the API test page HTML file.
-    """
-    # If you put the file in a 'static' folder:
-    return FileResponse("static/api-test-page.html")
-
-@app.get("/check-face-api/")
-def check_face_api():
-    """
-    Check if the Azure Face API credentials are working correctly.
-    """
-    try:
-        # Print API details for debugging
-        print(f"Face API Endpoint: {face_endpoint}")
-        print(f"Face API Key available: {'Yes' if face_key else 'No'}")
-        
-        # Just return the API configuration information
-        return {
-            "status": "info",
-            "message": "Azure Face API configuration",
-            "endpoint": face_endpoint,
-            "key_available": face_key is not None,
-            "client_initialized": face_client is not None
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Error checking API configuration: {str(e)}"
-        }
-    
-@app.get("/check-azure-credentials/")
-def check_azure_credentials():
-    """
-    Check if Azure Face API credentials are valid without making an API call.
-    """
-    # Print credentials for debugging (mask the key for security)
-    key_status = "Not set" if not face_key else f"Set ({face_key[:3]}...{face_key[-3:] if len(face_key) > 6 else ''})"
-    endpoint_status = "Not set" if not face_endpoint else face_endpoint
-    
-    # Basic validation of the credentials format
-    valid_key_format = face_key and len(face_key) > 10
-    valid_endpoint_format = face_endpoint and face_endpoint.startswith("https://") and "cognitiveservices.azure.com" in face_endpoint
-    
-    if not valid_key_format or not valid_endpoint_format:
-        return {
-            "valid": False,
-            "message": "Azure Face API credentials are not properly formatted",
-            "key_status": key_status,
-            "endpoint_status": endpoint_status,
-            "key_format_valid": valid_key_format,
-            "endpoint_format_valid": valid_endpoint_format
-        }
-    
-    # If the credentials look valid in format, return success
-    # This doesn't guarantee they work, but it's a start
-    return {
-        "valid": True,
-        "message": "Azure Face API credentials are properly formatted",
-        "key_status": key_status,
-        "endpoint_status": endpoint_status,
-        "note": "This check only verifies credential format, not API access. Try the 'Test Face Detection' to confirm API functionality."
-    }
-
-@app.post("/process-frame/{session_id}")
-async def process_frame(session_id: str, file: UploadFile = File(...)):
-    """
-    Process a video frame from the study session using facial landmarks.
-    Uses only basic detection features that don't require Limited Access approval.
-    
-    This endpoint now focuses more on head position and posture, while 
-    relying on client-side metrics for blink detection.
+    Pause a study session to track breaks.
     """
     if session_id not in study_sessions:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    if not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="File must be an image")
+    now = datetime.now().isoformat()
     
-    # Read the image file
-    contents = await file.read()
+    # Record the end of the current active period
+    if "current_active_start" in study_sessions[session_id]:
+        active_start = study_sessions[session_id]["current_active_start"]
+        study_sessions[session_id]["active_times"].append({
+            "start": active_start,
+            "end": now
+        })
+        study_sessions[session_id]["current_active_start"] = None
     
-    # Log file size for debugging
-    print(f"Image size: {len(contents)} bytes")
+    # Start a new pause period
+    study_sessions[session_id]["paused_times"].append({
+        "start": now,
+        "end": None
+    })
     
-    try:
-        # Convert bytes to a file-like object and reset position
-        image_stream = BytesIO(contents)
-        image_stream.seek(0)  # Ensure we're at the start of the stream
-        
-        # Try to perform a minimal face detection
-        try:
-            detected_faces = face_client.face.detect_with_stream(
-                image=image_stream,
-                return_face_id=False,
-                return_face_landmarks=True,  # Only get landmarks
-                return_face_attributes=[],   # No attributes
-                detection_model='detection_01'
-            )
-            
-            timestamp = datetime.now().isoformat()
-            
-            if not detected_faces:
-                # No face detected
-                study_sessions[session_id]["metrics"]["distraction_events"].append({
-                    "timestamp": timestamp,
-                    "reason": "no_face_detected"
-                })
-                return {"message": "No face detected", "suggestion": "Are you still there?"}
-            
-            # For simplicity, just process the first face detected
-            face = detected_faces[0]
-            landmarks = face.face_landmarks
-            
-            # Calculate head orientation using facial landmarks
-            nose_tip = [landmarks.nose_tip.x, landmarks.nose_tip.y]
-            left_eye = [(landmarks.eye_left_inner.x + landmarks.eye_left_outer.x) / 2, 
-                        (landmarks.eye_left_inner.y + landmarks.eye_left_outer.y) / 2]
-            right_eye = [(landmarks.eye_right_inner.x + landmarks.eye_right_outer.x) / 2, 
-                         (landmarks.eye_right_inner.y + landmarks.eye_right_outer.y) / 2]
-                         
-            # Calculate head orientation from landmarks
-            head_orientation = estimate_head_orientation(left_eye, right_eye, nose_tip)
-            
-            # Calculate face size for posture estimation
-            face_width = abs(landmarks.eye_left_outer.x - landmarks.eye_right_outer.x)
-            
-            # For height, use the distance from eye level to mouth level
-            mouth_y = (landmarks.mouth_left.y + landmarks.mouth_right.y) / 2
-            eye_y = (left_eye[1] + right_eye[1]) / 2
-            face_height = abs(eye_y - mouth_y) * 1.5  # Multiply by 1.5 to account for forehead
-            
-            face_size = face_width * face_height
-            
-            # Estimate posture based on face position in frame
-            posture_estimate = estimate_posture(face_size, nose_tip[1])
-            
-            # Store frame data
-            frame_data = {
-                "timestamp": timestamp,
-                "head_orientation": head_orientation,
-                "posture": posture_estimate,
-                "face_size": face_size
-            }
-            
-            # Add frame data to session
-            study_sessions[session_id]["frames"].append(frame_data)
-            
-            # Head pose-based distraction detection using our estimated yaw
-            head_yaw = abs(head_orientation["yaw"])
-            if head_yaw > 15:  # Looking too far to the side
-                study_sessions[session_id]["metrics"]["distraction_events"].append({
-                    "timestamp": timestamp,
-                    "reason": "looking_away",
-                    "yaw": head_yaw
-                })
-                return {
-                    "message": "Possible distraction detected",
-                    "suggestion": "Try to focus on your study materials",
-                    "details": frame_data
-                }
-            
-            # Check posture
-            if posture_estimate["is_slouching"]:
-                return {
-                    "message": "Posture check",
-                    "suggestion": "You might be slouching. Try to sit up straight for better focus.",
-                    "details": frame_data
-                }
-                
-            # If we have enough frames, check for significant posture changes
-            # which could indicate restlessness or discomfort
-            if len(study_sessions[session_id]["frames"]) > 5:
-                recent_frames = study_sessions[session_id]["frames"][-5:]
-                face_sizes = [frame["face_size"] for frame in recent_frames]
-                size_variance = np.var(face_sizes) if len(face_sizes) > 1 else 0
-                
-                # High variance in face size indicates movement toward/away from camera
-                if size_variance > 1000:  # Threshold determined empirically
-                    study_sessions[session_id]["metrics"]["posture_changes"].append({
-                        "timestamp": timestamp,
-                        "variance": size_variance
-                    })
-                    
-                    if len(study_sessions[session_id]["metrics"]["posture_changes"]) > 5:
-                        return {
-                            "message": "Frequent movement detected",
-                            "suggestion": "You seem restless. Consider taking a short break.",
-                            "details": frame_data
-                        }
-            
-            return {
-                "message": "Frame processed",
-                "details": frame_data
-            }
-            
-        except Exception as face_error:
-            print(f"Detailed face detection error: {str(face_error)}")
-            return {
-                "message": "Error during face detection",
-                "error": str(face_error)
-            }
-            
-    except Exception as e:
-        print(f"General frame processing error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error processing frame: {str(e)}")
+    return {"message": "Session paused", "timestamp": now}
+
+@app.post("/resume-session/{session_id}")
+def resume_session(session_id: str):
+    """
+    Resume a paused study session.
+    """
+    if session_id not in study_sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    now = datetime.now().isoformat()
+    
+    # End the current pause period if there is one
+    if study_sessions[session_id]["paused_times"] and study_sessions[session_id]["paused_times"][-1]["end"] is None:
+        study_sessions[session_id]["paused_times"][-1]["end"] = now
+    
+    # Start a new active period
+    study_sessions[session_id]["current_active_start"] = now
+    
+    return {"message": "Session resumed", "timestamp": now}
 
 @app.post("/submit-client-metrics/{session_id}")
 async def submit_client_metrics(session_id: str, metrics: ClientMetrics):
     """
-    New endpoint to receive client-side metrics, including blink detection
-    that's performed at a higher frequency in the browser.
+    Receive client-side metrics including tracking mode information.
+    This endpoint now handles all tracking data from the client.
     """
     if session_id not in study_sessions:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    # Add client metrics to session data
+    # Add metrics to session data
     study_sessions[session_id]["client_metrics"].append(metrics.dict())
     
     # Update server-side metrics with client-side data
+    timestamp = metrics.timestamp
+    
+    # Store blink rate
     study_sessions[session_id]["metrics"]["blink_rate"].append({
-        "timestamp": metrics.timestamp,
+        "timestamp": timestamp,
         "rate": metrics.blink_metrics.blink_rate
     })
     
-    # Check for concerning blink rate
-    if metrics.blink_metrics.blink_rate < 10:  # Less than 10 blinks per minute
-        return {
-            "message": "Low blink rate detected",
-            "suggestion": "Your blink rate is low. Consider taking a short break to rest your eyes.",
-            "client_metrics_received": True
-        }
+    # Store tracking mode changes
+    if metrics.tracking_mode:
+        study_sessions[session_id]["metrics"]["tracking_modes"].append({
+            "timestamp": timestamp,
+            "mode": metrics.tracking_mode
+        })
     
-    # Check for client-estimated attention
-    if metrics.client_estimated_attention is not None and metrics.client_estimated_attention < 0.6:
-        return {
-            "message": "Attention level decreasing",
-            "suggestion": "You may be losing focus. Consider switching to a different topic or take a short break.",
-            "client_metrics_received": True
-        }
-    
-    return {
-        "message": "Client metrics received",
-        "client_metrics_received": True
-    }
-
-@app.post("/end-session/{session_id}")
-def end_session(session_id: str):
-    """
-    End a study session and calculate final metrics.
-    """
-    if session_id not in study_sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
-    
-    study_sessions[session_id]["end_time"] = datetime.now().isoformat()
-    
-    # Calculate session duration
-    start_time = datetime.fromisoformat(study_sessions[session_id]["start_time"])
-    end_time = datetime.fromisoformat(study_sessions[session_id]["end_time"])
-    duration_minutes = (end_time - start_time).total_seconds() / 60
-    
-    # Calculate metrics
-    distraction_count = len(study_sessions[session_id]["metrics"]["distraction_events"])
-    distraction_rate = distraction_count / max(1, duration_minutes)
-    
-    # Calculate average focus time between distractions
-    avg_focus_minutes = duration_minutes / max(1, distraction_count + 1)
-    
-    # Get client-side blink metrics if available
-    avg_blink_rate = None
-    if study_sessions[session_id]["client_metrics"]:
-        blink_rates = [
-            metrics["blink_metrics"]["blink_rate"] 
-            for metrics in study_sessions[session_id]["client_metrics"]
-        ]
-        avg_blink_rate = sum(blink_rates) / len(blink_rates) if blink_rates else None
-    
-    # Calculate posture changes
-    posture_change_count = len(study_sessions[session_id]["metrics"]["posture_changes"])
-    
-    summary = {
-        "session_id": session_id,
-        "duration_minutes": duration_minutes,
-        "distraction_count": distraction_count,
-        "distraction_rate_per_minute": distraction_rate,
-        "average_focus_period_minutes": avg_focus_minutes,
-        "posture_change_count": posture_change_count,
-        "average_blink_rate": avg_blink_rate,
-        "suggestions": generate_suggestions(study_sessions[session_id])
-    }
-    
-    return summary
-
-@app.get("/session/{session_id}")
-def get_session(session_id: str):
-    """
-    Get details of a specific study session.
-    """
-    if session_id not in study_sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
-    
-    return study_sessions[session_id]
-
-# Utility functions
-
-def estimate_head_orientation(left_eye, right_eye, nose_tip):
-    """
-    Roughly estimate head orientation using only facial landmarks
-    when no head pose attributes are available.
-    """
-    # Calculate eye midpoint
-    eye_midpoint = [(left_eye[0] + right_eye[0]) / 2, (left_eye[1] + right_eye[1]) / 2]
-    
-    # Distance between eyes
-    eye_distance = ((right_eye[0] - left_eye[0])**2 + (right_eye[1] - left_eye[1])**2)**0.5
-    
-    # Calculate yaw (horizontal orientation)
-    # If nose tip is significantly to the left or right of the eye midpoint
-    # relative to the eye distance, the person is looking to the side
-    horizontal_diff = nose_tip[0] - eye_midpoint[0]
-    normalized_yaw = horizontal_diff / (eye_distance * 0.5)  # Normalize by half eye distance
-    estimated_yaw = normalized_yaw * 30  # Scale to roughly match degrees
-    
-    # Calculate pitch (vertical orientation)
-    # If nose tip is above or below eye midpoint
-    vertical_diff = nose_tip[1] - eye_midpoint[1]
-    normalized_pitch = vertical_diff / eye_distance
-    estimated_pitch = normalized_pitch * 25  # Scale to roughly match degrees
-    
-    return {
-        "yaw": estimated_yaw,       # Negative: looking left, Positive: looking right
-        "pitch": estimated_pitch,   # Negative: looking up, Positive: looking down
-        "is_looking_away": abs(estimated_yaw) > 15
-    }
-
-def estimate_posture(face_size, nose_y_position):
-    """
-    Estimate if the user is slouching or has poor posture based on face size
-    and vertical position in the frame.
-    
-    A smaller face size may indicate the user is leaning back.
-    A lower nose position may indicate slouching.
-    """
-    # These thresholds would need to be calibrated for your specific application
-    return {
-        "face_size": face_size,
-        "nose_y_position": nose_y_position,
-        "is_slouching": nose_y_position > 0.6,  # If nose is in lower part of frame
-        "is_leaning_back": face_size < 5000     # Threshold needs calibration
-    }
-
-def generate_suggestions(session_data):
-    """Generate personalized suggestions based on the session data."""
+    # Check for concerning metrics and generate suggestions
     suggestions = []
     
-    # Example suggestions based on simple heuristics
+    # Check blink rate
+    if metrics.blink_metrics.blink_rate < 10:  # Less than 10 blinks per minute
+        suggestions.append("Your blink rate is low. Consider taking a short break to rest your eyes.")
+    
+    # Check tracking mode
+    if metrics.tracking_mode == "motion" or metrics.tracking_mode == "memory":
+        suggestions.append("Face tracking intermittent. Consider adjusting your position or camera angle.")
+    elif metrics.tracking_mode == "inactive":
+        suggestions.append("No activity detected. Are you still studying?")
+    
+    # Check attention estimate
+    if metrics.client_estimated_attention is not None and metrics.client_estimated_attention < 0.6:
+        suggestions.append("You may be losing focus. Consider switching to a different topic or take a short break.")
+    
+    # Check for long periods without movement
+    if metrics.seconds_since_last_movement and metrics.seconds_since_last_movement > 300:  # 5 minutes
+        suggestions.append("You haven't moved in a while. Consider stretching or changing your position.")
+    
+    # If we have suggestions, randomly select one to avoid bombarding the user
+    if suggestions:
+        import random
+        suggestion = random.choice(suggestions)
+        
+        # Add to distraction events if this indicates a distraction
+        if "losing focus" in suggestion or "No activity" in suggestion:
+            study_sessions[session_id]["metrics"]["distraction_events"].append({
+                "timestamp": timestamp,
+                "reason": suggestion
+            })
+        
+        return {
+            "message": "Client metrics received",
+            "suggestion": suggestion
+        }
+    
+    return {
+        "message": "Client metrics received"
+    }
+
+#utils: generate_suggestions
+def generate_suggestions(session_data, tracking_stats=None):
+    """Generate personalized suggestions based on the session data and tracking statistics."""
+    suggestions = []
+    
+    # Check for distractions
     distraction_count = len(session_data["metrics"]["distraction_events"])
     
     if distraction_count > 10:
@@ -727,28 +281,173 @@ def generate_suggestions(session_data):
         blink_rates = [
             metrics["blink_metrics"]["blink_rate"] 
             for metrics in session_data["client_metrics"]
+            if "blink_metrics" in metrics and "blink_rate" in metrics["blink_metrics"]
         ]
         avg_blink_rate = sum(blink_rates) / len(blink_rates) if blink_rates else None
         
         if avg_blink_rate and avg_blink_rate < 10:  # Less than 10 blinks per minute
             low_blink_rate = True
             suggestions.append("Your blink rate was low, which may indicate eye strain. Try the 20-20-20 rule: Every 20 minutes, look at something 20 feet away for 20 seconds.")
+        elif avg_blink_rate and avg_blink_rate > 30:  # More than 30 blinks per minute
+            suggestions.append("Your blink rate was high, which may indicate fatigue. Consider scheduling your study sessions when you're more alert.")
     
+    # Check tracking stats for camera angle or positioning issues
+    if tracking_stats:
+        face_tracking_percent = tracking_stats.get('face', 0)
+        
+        if face_tracking_percent < 60:  # Less than 60% of time with direct face tracking
+            suggestions.append("Your face was only detected directly for about {:.0f}% of your session. Consider adjusting your camera angle or position for better tracking.")
+        
+        if 'inactive' in tracking_stats and tracking_stats['inactive'] > 20:
+            suggestions.append("There were significant periods with no activity detected. If you're taking breaks, consider using the pause feature.")
+    
+    # Add gaze-based suggestions
+    has_gaze_metrics = False
+    content_attention_percentage = 0
+    
+    # Check if we have gaze metrics
+    for metrics in session_data["client_metrics"]:
+        if "gaze_metrics" in metrics and metrics["gaze_metrics"] is not None:
+            has_gaze_metrics = True
+            if "looking_at_content_percentage" in metrics["gaze_metrics"]:
+                content_attention_percentage += metrics["gaze_metrics"]["looking_at_content_percentage"]
+    
+    if has_gaze_metrics:
+        # Calculate average content attention
+        avg_content_attention = content_attention_percentage / len(session_data["client_metrics"])
+        
+        if avg_content_attention < 70:
+            suggestions.append(f"You were looking at the study content only {avg_content_attention:.0f}% of the time. Try to minimize distractions in your environment.")
+        elif avg_content_attention > 95:
+            suggestions.append("Your visual focus is excellent! You maintained attention on the study content consistently.")
+
     # Check posture changes
     posture_change_count = len(session_data["metrics"]["posture_changes"])
     if posture_change_count > 10:
         suggestions.append("You changed posture frequently. Consider checking your chair ergonomics or taking shorter, more frequent breaks.")
     
-    # Check session duration for general advice
+    # Check session duration and effectiveness
     if "end_time" in session_data and session_data["end_time"] and "start_time" in session_data:
         start_time = datetime.fromisoformat(session_data["start_time"])
         end_time = datetime.fromisoformat(session_data["end_time"])
         duration_minutes = (end_time - start_time).total_seconds() / 60
         
+        # Calculate effective study time vs total time if we have active times
+        effective_minutes = duration_minutes
+        if session_data.get("active_times"):
+            active_seconds = sum(
+                (datetime.fromisoformat(period["end"]) - datetime.fromisoformat(period["start"])).total_seconds()
+                for period in session_data["active_times"]
+            )
+            effective_minutes = active_seconds / 60
+        
+        # Check if effective time is significantly less than total time
+        if effective_minutes < duration_minutes * 0.7:
+            suggestions.append(f"Your effective study time was only about {effective_minutes:.0f} minutes out of {duration_minutes:.0f} total minutes. Try to minimize interruptions for more efficient studying.")
+        
         if duration_minutes > 90 and not low_blink_rate:
             suggestions.append("You had a long study session. Remember to take regular breaks to maintain focus and prevent eye strain.")
+        
+        # Check for very short sessions
+        if duration_minutes < 15:
+            suggestions.append("Your study session was quite short. Consider scheduling longer blocks of time for deeper focus and learning.")
+    
+    # Add general suggestions if we don't have many specific ones
+    if len(suggestions) < 2:
+        suggestions.append("For better focus, try the Pomodoro Technique: 25 minutes of focused study followed by a 5-minute break.")
+        suggestions.append("Remember to hydrate regularly during study sessions to maintain optimal brain function.")
     
     return suggestions
+
+@app.post("/end-session/{session_id}")
+def end_session(session_id: str):
+    """
+    End a study session and calculate final metrics.
+    """
+    if session_id not in study_sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    # Ensure any active periods are properly closed
+    if study_sessions[session_id].get("current_active_start"):
+        now = datetime.now().isoformat()
+        study_sessions[session_id]["active_times"].append({
+            "start": study_sessions[session_id]["current_active_start"],
+            "end": now
+        })
+    
+    study_sessions[session_id]["end_time"] = datetime.now().isoformat()
+    
+    # Calculate session duration
+    start_time = datetime.fromisoformat(study_sessions[session_id]["start_time"])
+    end_time = datetime.fromisoformat(study_sessions[session_id]["end_time"])
+    duration_minutes = (end_time - start_time).total_seconds() / 60
+    
+    # Calculate effective study time (excluding pauses)
+    effective_duration_minutes = duration_minutes
+    
+    if study_sessions[session_id]["active_times"]:
+        # Calculate based on active time periods
+        active_time_seconds = 0
+        for period in study_sessions[session_id]["active_times"]:
+            period_start = datetime.fromisoformat(period["start"])
+            period_end = datetime.fromisoformat(period["end"])
+            active_time_seconds += (period_end - period_start).total_seconds()
+        
+        effective_duration_minutes = active_time_seconds / 60
+    
+    # Calculate metrics
+    distraction_count = len(study_sessions[session_id]["metrics"]["distraction_events"])
+    distraction_rate = distraction_count / max(1, effective_duration_minutes)
+    
+    # Calculate average focus time between distractions
+    avg_focus_minutes = effective_duration_minutes / max(1, distraction_count + 1)
+    
+    # Analyze tracking modes
+    tracking_modes = study_sessions[session_id]["metrics"]["tracking_modes"]
+    tracking_stats = {}
+    if tracking_modes:
+        # Count occurrences of each tracking mode
+        for entry in tracking_modes:
+            mode = entry["mode"]
+            if mode not in tracking_stats:
+                tracking_stats[mode] = 0
+            tracking_stats[mode] += 1
+        
+        # Convert to percentages
+        total_entries = len(tracking_modes)
+        for mode in tracking_stats:
+            tracking_stats[mode] = (tracking_stats[mode] / total_entries) * 100
+    
+    # Get client-side blink metrics if available
+    avg_blink_rate = None
+    if study_sessions[session_id]["client_metrics"]:
+        blink_rates = [
+            metrics["blink_metrics"]["blink_rate"] 
+            for metrics in study_sessions[session_id]["client_metrics"]
+            if "blink_metrics" in metrics and "blink_rate" in metrics["blink_metrics"]
+        ]
+        avg_blink_rate = sum(blink_rates) / len(blink_rates) if blink_rates else None
+    
+    # Calculate posture changes
+    posture_change_count = len(study_sessions[session_id]["metrics"]["posture_changes"])
+    
+    # Generate personalized suggestions
+    suggestions = generate_suggestions(study_sessions[session_id], tracking_stats)
+    
+    summary = {
+        "session_id": session_id,
+        "duration_minutes": duration_minutes,
+        "effective_study_minutes": effective_duration_minutes,
+        "distraction_count": distraction_count,
+        "distraction_rate_per_minute": distraction_rate,
+        "average_focus_period_minutes": avg_focus_minutes,
+        "posture_change_count": posture_change_count,
+        "average_blink_rate": avg_blink_rate,
+        "tracking_stats": tracking_stats,
+        "suggestions": suggestions
+    }
+    
+    return summary
 
 if __name__ == "__main__":
     uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
