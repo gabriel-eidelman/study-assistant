@@ -9,3 +9,7 @@ Backend: Python, FastAPI
 Enhanced blink detection for eye strain monitoring
 
 Posture detection improvements for better ergonomics
+
+Brief MVP Demo:
+
+![Demo_Study](https://github.com/user-attachments/assets/44aee97f-acf5-4592-a953-503dd5656c53)
