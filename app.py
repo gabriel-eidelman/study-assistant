@@ -61,8 +61,7 @@ if face_key and face_endpoint:
 else:
     print("Azure Face API credentials not found in environment variables")
 
-# In-memory storage for study sessions
-# In a production app, you would use a proper database
+# In-memory storage for study sessions, temp until using database
 study_sessions = {}
 
 # Pydantic models for data validation
@@ -463,7 +462,7 @@ async def process_frame(session_id: str, file: UploadFile = File(...)):
             timestamp = datetime.now().isoformat()
             
             if not detected_faces:
-                # No face detected
+                # When no faces are detected, assume the user was distracted and log the event
                 study_sessions[session_id]["metrics"]["distraction_events"].append({
                     "timestamp": timestamp,
                     "reason": "no_face_detected"
@@ -510,7 +509,7 @@ async def process_frame(session_id: str, file: UploadFile = File(...)):
             
             # Head pose-based distraction detection using our estimated yaw
             head_yaw = abs(head_orientation["yaw"])
-            if head_yaw > 15:  # Looking too far to the side
+            if head_yaw > 15:  # If user was looking to the side significantly, assume distraction event
                 study_sessions[session_id]["metrics"]["distraction_events"].append({
                     "timestamp": timestamp,
                     "reason": "looking_away",
