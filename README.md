@@ -1,4 +1,4 @@
-Study Assistant is a work in progress productivity tool designed to give users more control over their studying. It leverages computer vision to provide actionable insights on user habits.
+Study Assistant is an early-stage productivity tool that uses computer vision and a modular backend to help users track concentration and posture. This is a work in progress focused on experimenting with FastAPI, facial landmark detection, and component-style data tracking.
 
 🛠️ Tech Stack
 Frontend: HTML, JavaScript
